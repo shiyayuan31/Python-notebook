@@ -1,0 +1,191 @@
+# 光电赛的程序文件
+import numpy as np
+from ctypes import *  # import all
+import matplotlib.pyplot as plt
+
+
+class Spectrometer:
+    def __init__(self, lib, index=0):
+        # 封装在self里的变量，同一个类都可以use:self.xxx引用
+        self.lib = lib
+        self.index = index
+        self.error_code = 0
+
+        devcount = lib.seabreeze_open_all_spectrometers(self.error_code)  # 命令光谱仪打开，打开则返回1，否则返回0
+        if devcount == 1:
+            print(f"打开光谱仪")
+        else:
+            lib.seabreeze_close_all_spectrometers(self.error_code)  # 关闭所有光谱仪
+            print(f"没有打开光谱仪")
+
+# 独立可变初始化
+    def configure(self, integration_time):
+        self.integration_time = integration_time
+        self.lib.seabreeze_set_integration_time_microsec(self.index, self.error_code, self.integration_time)
+        self._load_wavelengths()  # 同时加载波长
+        print(f"积分时间设置为 {self.integration_time} μs，并加载了波长数据。")
+
+    def _load_wavelengths(self):
+        air_wavelengths_c = (c_double * 4096)()  # seabreeze,C function,creat a array to accept
+        self.lib.seabreeze_get_wavelengths(self.index, self.error_code, air_wavelengths_c, 4096)
+        self.wavelengths = np.ctypeslib.as_array(air_wavelengths_c).astype(np.float64)  # change c type array into numpy
+        print(f"success load wavelength")
+
+        return self.wavelengths  # 单独想拿波长，也可以直接调用 _load_wavelengths()
+
+    def capture_spectrum(self):
+        # 采集光谱
+        air_lightspec_c = (c_double * 4096)()
+        self.lib.seabreeze_get_formatted_spectrum(self.index, self.error_code, air_lightspec_c, 4096)
+        intensity = np.ctypeslib.as_array(air_lightspec_c).astype(np.float64)
+        print(f"success load intensity")
+
+        return intensity
+
+lib = cdll.LoadLibrary('D:\光谱仪资料\sdk4.1\[4] USB Dome\[3] python demo for windows\SeaBreeze.dll')
+spec = Spectrometer(lib)
+spec.configure(integration_time=500*100)  # 500ms积分时间
+
+wavelengths = spec._load_wavelengths()   # 单独要波长
+# 采集空气谱数据
+intensity_bg = spec.capture_spectrum()
+# 采集原始光谱数据
+intensity_origin = spec.capture_spectrum()
+intensity_nut = intensity_origin - intensity_bg
+
+class SignalProcessor:
+    def __init__(self, wavelengths, intensity_nut, intensity_origin):
+        self.wavelengths = wavelengths
+        self.intensity_nut = intensity_nut
+        self.intensity_origin = intensity_origin
+
+    def calculate_centroid(self):
+        total_intensity = np.sum(self.intensity_nut)
+        if total_intensity == 0:
+            raise ValueError("光谱强度总和为0，无法计算质心。")
+
+        wavelengths_centroid = np.sum(self.intensity_nut * self.wavelengths)/total_intensity
+        intensity_centroid = np.sum(self.intensity_nut * self.intensity_nut)/total_intensity
+
+        return wavelengths_centroid, intensity_centroid
+
+    def apply_bandpass_filter(self, lowcut, highcut):
+        '''
+        Apply a bandpass filter to the original intensity data.
+        1. Interpolate to uniform wavelength grid.
+        2. Perform FFT.
+        3. Select frequency band between lowcut and highcut.
+        4. Inverse FFT to reconstruct filtered signal.
+        Returns the filtered intensity.
+        '''
+# 这里lowcut, highcut可以直接用，或者包装成self.xxx（原则见onenote笔记）
+
+        interp_wavelengths = np.arange(386.751, 1098.7, 0.1738156)  # 插值到指定波长间隔
+        interpolated_intensity = np.interp(interp_wavelengths, self.wavelengths, self.intensity_origin) # 插值
+
+        fft_result = np.fft.fft(interpolated_intensity)  # fft变换
+
+        n = len(interp_wavelengths)
+        freqs = np.fft.fftfreq(n, d=0.1738156)
+        idx_low = np.argmin(np.abs(freqs - lowcut))
+        idx_high = np.argmin(np.abs(freqs - highcut))
+        if idx_low < 0:
+            idx_low = 0
+        if idx_high >= len(freqs):
+            idx_high = len(freqs) - 1
+        if idx_high < idx_low:
+            idx_high, idx_low = idx_low, idx_high
+
+        fft_filtered = np.zeros_like(fft_result, dtype=np.complex128)
+        fft_filtered[idx_low:idx_high + 1] = fft_result[idx_low:idx_high + 1]
+        fft_filtered[-idx_high:-idx_low + 1] = fft_result[-idx_high:-idx_low + 1]
+        # 去除直流成分
+        fft_filtered[0] = 0     # 选频滤波
+
+        ifft_result = np.real(np.fft.ifft(fft_filtered))  # 取实部    # 逆傅里叶变换
+
+        return ifft_result
+
+    '''  self.intensity_nut = np.real(filtered_signal)  # 更新内部 intensity_nut 为滤波后的结果
+    保存这里只是为了：self.xxx有些要这样更新这个思想以后可能会用到'''
+
+    def track_reflection_intensity(self, wavelength_min, wavelength_max):
+        """
+           在指定波长范围内，找到光强最大值及其对应波长。
+           wavelength_min: 范围下限 (nm)
+           wavelength_max: 范围上限 (nm)
+           :return: (max_wavelength, max_intensity)
+        """
+        # 找到波长范围内的索引
+        mask = (self.wavelengths >= wavelength_min) & (self.wavelengths <= wavelength_max)
+
+        # 判断范围内有没有数据
+        if not np.any(mask):
+            print("Warning: 在选定波长范围内没有找到数据！")
+            return None, None
+
+        # 选出对应范围内的光强和波长
+        selected_wavelengths = self.wavelengths[mask]
+        selected_intensity = self.intensity_nut[mask]
+
+        # 找最大值及其对应波长
+        max_idx = np.argmax(selected_intensity)
+        max_wavelength = selected_wavelengths[max_idx]
+        max_intensity = selected_intensity[max_idx]
+
+        return max_wavelength, max_intensity
+
+# 应用类时先创建对象！
+signal_process = SignalProcessor(wavelengths, intensity_nut, intensity_origin)
+
+x_centroid, y_centroid = signal_process.calculate_centroid()
+fft_filtered_signal = signal_process.apply_bandpass_filter(0.0211, 0.0279)
+max_x, max_y = signal_process.track_reflection_intensity(400, 500)
+
+# print(f"波长数组: {wavelengths}")
+# print(f"光谱强度: {intensity_origin}")
+# print(f"质心: x={x_centroid}，y={y_centroid}")
+# # print(f"傅里叶滤波结果: {fft_filtered_signal}")
+# '''这句话将数组结果转为.2f形式输出'''
+# print(f"傅里叶滤波结果: {np.array2string(fft_filtered_signal, formatter={'float_kind': lambda x: f'{x:.2f}'})}")
+# print(f"反射峰最大值点: （{max_x:.2f}，{max_y:.2f}）")
+
+
+class Visualizer:
+    def __init__(self):
+        pass
+
+    def plot_spectrum(self, wavelength, intensity):
+        plt.plot(wavelength, intensity)
+        plt.xlabel('Wavelength (nm)')
+        plt.ylabel('Intensity')
+        plt.title('Spectrum')
+        plt.show()
+
+
+'''把本文将要执行的操作封装成函数、类'''
+class App:
+    def __init__(self):
+        self.spectrometer = Spectrometer()
+        self.visualizer = Visualizer()
+
+    def run(self):
+        # 采集数据
+        wavelength, intensity = self.spectrometer.capture_spectrum()
+
+        # 处理数据
+        processor = SignalProcessor(wavelength, intensity)
+        processor.smooth()
+        processor.normalize()
+
+        # 显示数据
+        self.visualizer.plot_spectrum(processor.wavelength, processor.intensity)
+
+'''用于填写执行本文件要调用的一些操作，其他函数可作为函数库被其他文件通过import调用'''
+if __name__ == "__main__":
+    app = App()
+    app.run()
+
+
+
+

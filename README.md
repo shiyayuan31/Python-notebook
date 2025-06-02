@@ -1,2 +1,2 @@
 # Python-notebook
-### pandas、numpy、matplotlib、scipy和机器学习算法笔记/速查手册
+### pandas语法笔记和用于操控光谱仪进行光谱分析、动态显示的代码

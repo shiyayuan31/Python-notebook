@@ -77,73 +77,6 @@ class SignalProcessor:
 
         return wavelengths_centroid, intensity_centroid
 
-    def apply_fft_filter(self, lowcut, highcut):
-        '''
-        Apply a bandpass filter to the original intensity data.
-        1. Interpolate to uniform wavelength grid.
-        2. Perform FFT.
-        3. Select frequency band between lowcut and highcut.
-        4. Inverse FFT to reconstruct filtered signal.
-        Returns the filtered intensity.
-        '''
-# 这里lowcut, highcut可以直接用，或者包装成self.xxx（原则见onenote笔记）
-
-        interp_wavelengths = np.arange(386.751, 1098.7, 0.1738156)  # 插值到指定波长间隔
-        interpolated_intensity = np.interp(interp_wavelengths, self.wavelengths, self.intensity_origin)  # 插值
-
-        fft_result = np.fft.fft(interpolated_intensity)  # fft变换
-
-        n = len(interp_wavelengths)
-        freqs = np.fft.fftfreq(n, d=0.1738156)
-        idx_low = np.argmin(np.abs(freqs - lowcut))
-        idx_high = np.argmin(np.abs(freqs - highcut))
-        if idx_low < 0:
-            idx_low = 0
-        if idx_high >= len(freqs):
-            idx_high = len(freqs) - 1
-        if idx_high < idx_low:
-            idx_high, idx_low = idx_low, idx_high
-
-        fft_filtered = np.zeros_like(fft_result, dtype=np.complex128)
-        fft_filtered[idx_low:idx_high + 1] = fft_result[idx_low:idx_high + 1]
-        fft_filtered[-idx_high:-idx_low + 1] = fft_result[-idx_high:-idx_low + 1]
-        # 去除直流成分
-        fft_filtered[0] = 0     # 选频滤波
-
-        ifft_result = np.real(np.fft.ifft(fft_filtered))  # 取实部    # 逆傅里叶变换
-
-        return ifft_result
-
-    '''  self.intensity_nut = np.real(filtered_signal)  # 更新内部 intensity_nut 为滤波后的结果
-    保存这里只是为了：self.xxx有些要这样更新这个思想以后可能会用到'''
-
-    def track_reflection_intensity(self, wavelength_min, wavelength_max):
-        """
-           在指定波长范围内，找到光强最大值及其对应波长。
-           wavelength_min: 范围下限 (nm)
-           wavelength_max: 范围上限 (nm)
-           :return: (max_wavelength, max_intensity)
-        """
-        # 找到波长范围内的索引
-        mask = (self.wavelengths >= wavelength_min) & (self.wavelengths <= wavelength_max)
-
-        # 判断范围内有没有数据
-        if not np.any(mask):
-            print("Warning: 在选定波长范围内没有找到数据！")
-            return None, None
-
-        # 选出对应范围内的光强和波长
-        selected_wavelengths = self.wavelengths[mask]
-        selected_intensity = self.intensity_net[mask]
-
-        # 找最大值及其对应波长（临时改成了最小值）
-        max_idx = np.argmin(selected_intensity)
-        max_wavelength = selected_wavelengths[max_idx]
-        max_intensity = selected_intensity[max_idx]
-
-        # return max_wavelength, max_intensity
-        return max_intensity
-
     # 平滑函数(未使用self参数的时候会在函数名出现波浪线)
     def gaussian_smoothing(self, sigma):
         return gaussian_filter1d(self.intensity_net, sigma)
@@ -165,15 +98,10 @@ class Plotter:
         self.text_centroid = self.ax.text(0.8, 0.95, '',
                                           transform=self.ax.transAxes,
                                           fontsize=12, ha='center')
-        self.text_fft = self.ax.text(0.8, 0.90, '',
-                                     transform=self.ax.transAxes,
-                                     fontsize=12, ha='center')
-        self.text_max_intensity = self.ax.text(0.8, 0.85, '',
-                                               transform=self.ax.transAxes,
-                                               fontsize=12, ha='center')
-        self.text_cal_result = self.ax.text(0.8, 0.80, '',
-                                               transform=self.ax.transAxes,
-                                               fontsize=12, ha='center')
+
+        self.text_cal_result = self.ax.text(0.8, 0.90, '',
+                                            transform=self.ax.transAxes,
+                                            fontsize=12, ha='center')
 
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)   # 创建物理画布（画在哪，与tk窗口绑定）
@@ -185,16 +113,18 @@ class Plotter:
         self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)    # 导航工具栏放置（满x轴）
 
 
-    def plotting(self, x, y, text1, text2, text3, text4):
+    def plotting(self, x, y, text1, text2):
         self.line.set_data(x, y)
         self.text_centroid.set_text(f"质心：({text1:.2f}，{text2:.2f})")
-        self.text_fft.set_text(f"干涉峰波长偏移{text3:.2f}")
-        self.text_max_intensity.set_text(f"反射峰光强变化{text4:.2f}")
 
         self.canvas.draw()
 
     def cal_result_plot(self, result):
-        self.text_cal_result.set_text(f"计算结果:{result}")
+        if result == "待测":
+            self.text_cal_result.set_text(f"计算结果:{result}")
+
+        else:
+            self.text_cal_result.set_text(f"计算结果:{result:.4f}")
 
         self.canvas.draw()
 
@@ -209,9 +139,6 @@ class App:
         self.result = "待测"  # 这是点击“计算”的计算结果
         self.centroid_x = []
         self.centroid_y = []
-        self.delta_fft = []
-        self.delta_intensity = []
-        self.min_ifft = []
         self.calculate = []
 
 
@@ -308,23 +235,12 @@ class App:
         self.centroid_x.append(temp_centroid_x)
         self.centroid_y.append(temp_centroid_y)
 
-        min_idx = np.argmin(self.signal_process.apply_fft_filter(0.0211, 0.0279))
-        min_wavelength = self.wavelengths[min_idx]
-        self.min_ifft.append(min_wavelength)
-        if len(self.min_ifft) > 1:
-            self.delta_fft.append(self.min_ifft[-1]-self.min_ifft[0])
-
-        max_intensity = self.signal_process.track_reflection_intensity(500, 700)    # 波段
-        self.delta_intensity.append(max_intensity)
-
         intensity_gauss_filtered = self.signal_process.gaussian_smoothing(22)      # 调节sigma参数
         # 显示
         self.plotter.plotting(self.wavelengths,
                               intensity_gauss_filtered,
                               temp_centroid_x,
-                              temp_centroid_y,
-                              min_wavelength,
-                              max_intensity)
+                              temp_centroid_y,)
 
         if not self.is_calculating:
             self.plotter.cal_result_plot(self.result)
@@ -335,20 +251,29 @@ class App:
         if not self.is_catching:
             return
 
-        self.calculate.append(self.centroid_x[-2:])  # 最新两个元素
+        self.calculate.append(self.centroid_x[-2])
+        self.calculate.append(self.centroid_x[-1])  # 最新两个元素
         self.is_catching = False
-        print(self.centroid_x[-2:])
+        print(self.centroid_x[-2], self.centroid_x[-1])
 
     def _for_cal_average(self):
         if not self.is_calculating:
             return
 
-        if any(isinstance(x, list) for x in self.calculate):
-            self.calculate = [item for sublist in self.calculate for item in sublist]
+        if len(self.calculate) == 0:
+            print("你没有点击采集数据！")
+            self.is_calculating = not self.is_calculating
+            print(self.is_calculating)
 
-        self.result = sum(self.calculate) / len(self.calculate)
-        self.plotter.cal_result_plot(f"{self.result:.2f}")
-        self.root.after(300, self._for_cal_average)
+        else:
+            if any(isinstance(x, list) for x in self.calculate):
+                self.calculate = [item for sublist in self.calculate for item in sublist]
+
+            self.result = sum(self.calculate) / len(self.calculate)
+            self.plotter.cal_result_plot(self.result)
+
+            self.is_calculating = not self.is_calculating
+            self.root.after(300, self._for_cal_average)
 
     def _for_clear_data(self):
         if not self.is_clearing:
@@ -356,7 +281,11 @@ class App:
 
         self.calculate = []
         self.result = "待测"
-        self.is_calculating = not self.is_calculating
+        # self.is_calculating = not self.is_calculating
+        self.is_clearing = not self.is_clearing
+
+        self.plotter.cal_result_plot(self.result)
+
         print("calculate已经清空！")
 
     def toggle_pause(self):
@@ -371,7 +300,7 @@ class App:
             return
 
         # 统一取最短的长度，避免索引越界
-        min_len = min(len(self.centroid_x), len(self.centroid_y), len(self.delta_fft))
+        min_len = min(len(self.centroid_x), len(self.centroid_y))
 
         filepath = filedialog.asksaveasfilename(
             defaultextension=".csv",
@@ -380,9 +309,9 @@ class App:
         if filepath:
             with open(filepath, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["质心X坐标", "质心Y坐标", "delta_fft"])
+                writer.writerow(["质心X坐标", "质心Y坐标"])
                 for i in range(min_len):
-                    writer.writerow([self.centroid_x[i], self.centroid_y[i], self.delta_fft[i]])
+                    writer.writerow([self.centroid_x[i], self.centroid_y[i]])
             print("成功导出数据！")
 
     def catch_data(self):

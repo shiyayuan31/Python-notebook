@@ -148,14 +148,7 @@ class SignalProcessor:
     def gaussian_smoothing(self, sigma):
         return gaussian_filter1d(self.intensity_net, sigma)
 
-'''# 应用类时先创建对象！
-signal_process = SignalProcessor(wavelengths, intensity_nut, intensity_origin)
 
-x_centroid, y_centroid = signal_process.calculate_centroid()
-fft_filtered_signal = signal_process.apply_bandpass_filter(0.0211, 0.0279)
-max_x, max_y = signal_process.track_reflection_intensity(400, 500)'''
-
-'''把本文将要执行的操作封装成函数、类'''
 
 class Plotter:
     def __init__(self, root):
@@ -178,6 +171,10 @@ class Plotter:
         self.text_max_intensity = self.ax.text(0.8, 0.85, '',
                                                transform=self.ax.transAxes,
                                                fontsize=12, ha='center')
+        self.text_cal_result = self.ax.text(0.8, 0.80, '',
+                                               transform=self.ax.transAxes,
+                                               fontsize=12, ha='center')
+
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)   # 创建物理画布（画在哪，与tk窗口绑定）
         self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)    # 将canvas的tk组件（布局）放到窗口
@@ -196,6 +193,11 @@ class Plotter:
 
         self.canvas.draw()
 
+    def cal_result_plot(self, result):
+        self.text_cal_result.set_text(f"计算结果:{result}")
+
+        self.canvas.draw()
+
 
 class App:
     def __init__(self, root: tk.Tk):
@@ -204,11 +206,13 @@ class App:
         self.wavelengths = None
         self.current_net_spec = None
         self.original_spec = None
+        self.result = "待测"  # 这是点击“计算”的计算结果
         self.centroid_x = []
         self.centroid_y = []
         self.delta_fft = []
         self.delta_intensity = []
         self.min_ifft = []
+        self.calculate = []
 
 
         # == 设置窗口 ==
@@ -225,6 +229,10 @@ class App:
         '''2.状态控制'''
         self.is_measuring = False
         self.is_paused = False
+        self.is_catching = False  # 如不在_init_中初始化变量会有黄色波浪线
+        self.is_calculating = False
+        self.is_clearing = False
+
 
         '''3.创建提示窗ui组件'''
         self._creat_ui_small()    # “_”私有：仅这个类能用
@@ -244,8 +252,9 @@ class App:
 
     def start_measurement(self):
         self.root.destroy()  # 关闭提示窗口
-        self.is_paused = False
-        self.is_measuring = True
+
+        self.is_measuring = True    # 开始测量仅改变is_measuring状态
+
         self._big_ui_window()  # 打开新窗口显示动态图
 
     def _big_ui_window(self):
@@ -263,6 +272,13 @@ class App:
         self.paused_btn.pack(side=tk.LEFT, padx=4, pady=2)
         self.export_btn = tk.Button(self.plotter.toolbar, text="数据导出", command=self.export_data)
         self.export_btn.pack(side=tk.LEFT, padx=4, pady=2)
+        self.catch_btn = tk.Button(self.plotter.toolbar, text="采集", command=self.catch_data)
+        self.catch_btn.pack(side=tk.LEFT, padx=4, pady=2)
+        self.calculate_btn = tk.Button(self.plotter.toolbar, text="计算", command=self.cal_average)
+        self.calculate_btn.pack(side=tk.LEFT, padx=4, pady=2)
+        self.clear_btn = tk.Button(self.plotter.toolbar, text="清除", command=self.clear)
+        self.clear_btn.pack(side=tk.LEFT, padx=4, pady=2)
+
 
         # 循环采集、信号处理、显示
         self._capture_loop()
@@ -309,7 +325,39 @@ class App:
                               temp_centroid_y,
                               min_wavelength,
                               max_intensity)
+
+        if not self.is_calculating:
+            self.plotter.cal_result_plot(self.result)
+
         self.root.after(300, self._capture_loop)
+
+    def _for_catch_btn(self):
+        if not self.is_catching:
+            return
+
+        self.calculate.append(self.centroid_x[-2:])  # 最新两个元素
+        self.is_catching = False
+        print(self.centroid_x[-2:])
+
+    def _for_cal_average(self):
+        if not self.is_calculating:
+            return
+
+        if any(isinstance(x, list) for x in self.calculate):
+            self.calculate = [item for sublist in self.calculate for item in sublist]
+
+        self.result = sum(self.calculate) / len(self.calculate)
+        self.plotter.cal_result_plot(f"{self.result:.2f}")
+        self.root.after(300, self._for_cal_average)
+
+    def _for_clear_data(self):
+        if not self.is_clearing:
+            return
+
+        self.calculate = []
+        self.result = "待测"
+        self.is_calculating = not self.is_calculating
+        print("calculate已经清空！")
 
     def toggle_pause(self):
         self.is_paused = not self.is_paused     # 继续就是多按一下
@@ -336,6 +384,24 @@ class App:
                 for i in range(min_len):
                     writer.writerow([self.centroid_x[i], self.centroid_y[i], self.delta_fft[i]])
             print("成功导出数据！")
+
+    def catch_data(self):
+        self.is_catching = not self.is_catching
+
+        if self.is_catching:
+            self._for_catch_btn()
+
+    def cal_average(self):
+        self.is_calculating = not self.is_calculating
+
+        if self.is_calculating:
+            self._for_cal_average()
+
+    def clear(self):
+        self.is_clearing = not self.is_clearing
+
+        if self.is_clearing:
+            self._for_clear_data()
 
     def run(self):
         self.root.mainloop()

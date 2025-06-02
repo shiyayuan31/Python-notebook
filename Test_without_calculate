@@ -1,0 +1,350 @@
+# 光电赛的程序文件
+import numpy as np
+from ctypes import *  # import all
+import tkinter as tk
+from tkinter import filedialog
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+import csv
+from matplotlib.pylab import mpl
+from scipy.ndimage import gaussian_filter1d
+# 前期准备_______________________________
+mpl.rcParams['axes.unicode_minus'] = False  # 显示负号
+mpl.rcParams['font.sans-serif'] = ['SimHei']  # 显示中文
+
+
+class Spectrometer:
+    def __init__(self, lib, index=0):
+        # 封装在self里的变量，同一个类都可以use:self.xxx引用
+        self.lib = lib
+        self.index = index
+        self.error_code = 0
+
+        devcount = lib.seabreeze_open_all_spectrometers(self.error_code)  # 命令光谱仪打开，打开则返回1，否则返回0
+        if devcount == 1:
+            print(f"打开光谱仪")
+        else:
+            lib.seabreeze_close_all_spectrometers(self.error_code)  # 关闭所有光谱仪
+            print(f"没有打开光谱仪")
+
+# 独立可变初始化
+    def configure(self, integration_time):
+        self.integration_time = integration_time
+        self.lib.seabreeze_set_integration_time_microsec(self.index, self.error_code, self.integration_time)
+        print(f"积分时间设置为 {self.integration_time} μs")
+
+    def load_wavelengths(self):
+        air_wavelengths_c = (c_double * 4096)()  # seabreeze,C function,creat a array to accept
+        self.lib.seabreeze_get_wavelengths(self.index, self.error_code, air_wavelengths_c, 4096)
+        wavelengths = np.ctypeslib.as_array(air_wavelengths_c).astype(np.float64)  # change c type array into numpy
+        # print(f"success load wavelength")
+        # print(wavelengths)
+
+        return wavelengths  # 单独想拿波长，也可以直接调用 _load_wavelengths()
+
+    def capture_spectrum(self):
+        # 采集光谱
+        air_lightspec_c = (c_double * 4096)()
+        self.lib.seabreeze_get_formatted_spectrum(self.index, self.error_code, air_lightspec_c, 4096)
+        intensity = np.ctypeslib.as_array(air_lightspec_c).astype(np.float64)
+        # print(f"success load intensity")
+
+        return intensity
+
+    def bg_capture(self):
+        air_lightspec_c_bg = (c_double * 4096)()
+        self.lib.seabreeze_get_formatted_spectrum(self.index, self.error_code, air_lightspec_c_bg, 4096)
+        bg_intensity = np.ctypeslib.as_array(air_lightspec_c_bg).astype(np.float64)
+        print(f"success load bg_intensity")
+
+        return bg_intensity
+
+
+class SignalProcessor:
+    def __init__(self, spec, net_intensity, origin_intensity):
+        self.spec = spec
+        self.wavelengths = self.spec.load_wavelengths()
+        self.intensity_net = net_intensity
+        self.intensity_origin = origin_intensity
+
+    def calculate_centroid(self):
+        total_intensity = np.sum(self.intensity_net)
+        if total_intensity == 0:
+            raise ValueError("光谱强度总和为0，无法计算质心。")
+
+        wavelengths_centroid = np.sum(self.intensity_net * self.wavelengths)/total_intensity
+        intensity_centroid = np.sum(self.intensity_net * self.intensity_net)/total_intensity
+
+        return wavelengths_centroid, intensity_centroid
+
+    def apply_fft_filter(self, lowcut, highcut):
+        '''
+        Apply a bandpass filter to the original intensity data.
+        1. Interpolate to uniform wavelength grid.
+        2. Perform FFT.
+        3. Select frequency band between lowcut and highcut.
+        4. Inverse FFT to reconstruct filtered signal.
+        Returns the filtered intensity.
+        '''
+# 这里lowcut, highcut可以直接用，或者包装成self.xxx（原则见onenote笔记）
+
+        interp_wavelengths = np.arange(386.751, 1098.7, 0.1738156)  # 插值到指定波长间隔
+        interpolated_intensity = np.interp(interp_wavelengths, self.wavelengths, self.intensity_origin)  # 插值
+
+        fft_result = np.fft.fft(interpolated_intensity)  # fft变换
+
+        n = len(interp_wavelengths)
+        freqs = np.fft.fftfreq(n, d=0.1738156)
+        idx_low = np.argmin(np.abs(freqs - lowcut))
+        idx_high = np.argmin(np.abs(freqs - highcut))
+        if idx_low < 0:
+            idx_low = 0
+        if idx_high >= len(freqs):
+            idx_high = len(freqs) - 1
+        if idx_high < idx_low:
+            idx_high, idx_low = idx_low, idx_high
+
+        fft_filtered = np.zeros_like(fft_result, dtype=np.complex128)
+        fft_filtered[idx_low:idx_high + 1] = fft_result[idx_low:idx_high + 1]
+        fft_filtered[-idx_high:-idx_low + 1] = fft_result[-idx_high:-idx_low + 1]
+        # 去除直流成分
+        fft_filtered[0] = 0     # 选频滤波
+
+        ifft_result = np.real(np.fft.ifft(fft_filtered))  # 取实部    # 逆傅里叶变换
+
+        return ifft_result
+
+    '''  self.intensity_nut = np.real(filtered_signal)  # 更新内部 intensity_nut 为滤波后的结果
+    保存这里只是为了：self.xxx有些要这样更新这个思想以后可能会用到'''
+
+    def track_reflection_intensity(self, wavelength_min, wavelength_max):
+        """
+           在指定波长范围内，找到光强最大值及其对应波长。
+           wavelength_min: 范围下限 (nm)
+           wavelength_max: 范围上限 (nm)
+           :return: (max_wavelength, max_intensity)
+        """
+        # 找到波长范围内的索引
+        mask = (self.wavelengths >= wavelength_min) & (self.wavelengths <= wavelength_max)
+
+        # 判断范围内有没有数据
+        if not np.any(mask):
+            print("Warning: 在选定波长范围内没有找到数据！")
+            return None, None
+
+        # 选出对应范围内的光强和波长
+        selected_wavelengths = self.wavelengths[mask]
+        selected_intensity = self.intensity_net[mask]
+
+        # 找最大值及其对应波长（临时改成了最小值）
+        max_idx = np.argmin(selected_intensity)
+        max_wavelength = selected_wavelengths[max_idx]
+        max_intensity = selected_intensity[max_idx]
+
+        # return max_wavelength, max_intensity
+        return max_intensity
+
+    # 平滑函数(未使用self参数的时候会在函数名出现波浪线)
+    def gaussian_smoothing(self, sigma):
+        return gaussian_filter1d(self.intensity_net, sigma)
+
+'''# 应用类时先创建对象！
+signal_process = SignalProcessor(wavelengths, intensity_nut, intensity_origin)
+
+x_centroid, y_centroid = signal_process.calculate_centroid()
+fft_filtered_signal = signal_process.apply_bandpass_filter(0.0211, 0.0279)
+max_x, max_y = signal_process.track_reflection_intensity(400, 500)'''
+
+'''把本文将要执行的操作封装成函数、类'''
+
+class Plotter:
+    def __init__(self, root):
+        self.root = root
+        self.fig = Figure(figsize=(10, 6))  # 创建逻辑画布
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_title('净光谱图', fontsize=18)
+        self.ax.set_xlim(380, 1100)
+        self.ax.set_ylim(-5000, 5000)
+        self.ax.set_xlabel('波长(nm)', fontsize=15)
+        self.ax.set_ylabel('光强（.a.u）', fontsize=15)  # 设置画布画什么
+
+        self.line, = self.ax.plot([], [], lw=2, color='#54E78C')
+        self.text_centroid = self.ax.text(0.8, 0.95, '',
+                                          transform=self.ax.transAxes,
+                                          fontsize=12, ha='center')
+        self.text_fft = self.ax.text(0.8, 0.90, '',
+                                     transform=self.ax.transAxes,
+                                     fontsize=12, ha='center')
+        self.text_max_intensity = self.ax.text(0.8, 0.85, '',
+                                               transform=self.ax.transAxes,
+                                               fontsize=12, ha='center')
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)   # 创建物理画布（画在哪，与tk窗口绑定）
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)    # 将canvas的tk组件（布局）放到窗口
+
+        # 创建工具栏并放入窗口(工具栏、按钮这些不是画布！不受canvas.get_tk_widget()影响)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.root)
+        self.toolbar.update()
+        self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)    # 导航工具栏放置（满x轴）
+
+
+    def plotting(self, x, y, text1, text2, text3, text4):
+        self.line.set_data(x, y)
+        self.text_centroid.set_text(f"质心：({text1:.2f}，{text2:.2f})")
+        self.text_fft.set_text(f"干涉峰波长偏移{text3:.2f}")
+        self.text_max_intensity.set_text(f"反射峰光强变化{text4:.2f}")
+
+        self.canvas.draw()
+
+
+class App:
+    def __init__(self, root: tk.Tk):
+        # 主要数据
+        self.bg_spec = None
+        self.wavelengths = None
+        self.current_net_spec = None
+        self.original_spec = None
+        self.centroid_x = []
+        self.centroid_y = []
+        self.delta_fft = []
+        self.delta_intensity = []
+        self.min_ifft = []
+
+
+        # == 设置窗口 ==
+        self.root = root
+        self.root.title("动态采集系统")
+        self.root.geometry("350x250")
+
+        '''1.初始化模块'''
+        # == 初始化光谱仪和spec类 ==
+        self.lib = cdll.LoadLibrary('D:/光谱仪资料/sdk4.1/[4] USB Dome/[3] python demo for windows/SeaBreeze.dll')
+        self.spec = Spectrometer(self.lib)
+        self.spec.configure(integration_time=50 * 1000)  # 50ms积分时间
+
+        '''2.状态控制'''
+        self.is_measuring = False
+        self.is_paused = False
+
+        '''3.创建提示窗ui组件'''
+        self._creat_ui_small()    # “_”私有：仅这个类能用
+
+    def _creat_ui_small(self):
+        self.message_label = tk.Label(
+            self.root,
+            text="是否开始进行采集背景",
+            font=("SimSun", 20)
+        )
+        self.message_label.pack(pady=40)
+
+        self.yes_btn1 = tk.Button(self.root, text="是", command=self.bg_measurement, font=("SimSun", 20), width=5, height=1)
+        self.no_btn1 = tk.Button(self.root, text="否", command=self.quit_program, font=("SimSun", 20), width=5, height=1)
+        self.yes_btn1.pack(side=tk.LEFT, padx=45, pady=20)
+        self.no_btn1.pack(side=tk.RIGHT, padx=45, pady=20)
+
+    def start_measurement(self):
+        self.root.destroy()  # 关闭提示窗口
+        self.is_paused = False
+        self.is_measuring = True
+        self._big_ui_window()  # 打开新窗口显示动态图
+
+    def _big_ui_window(self):
+        self.root = tk.Tk()     # 需要用tk.Tk()创建新的Tkinter窗口
+        self.root.title("信号分析结果")
+        window_width = 950
+        window_height = 750
+        self.root.geometry(f"{window_width}x{window_height}")
+
+        '''初始化plotter类==(在init内初始化可能会弹出两个窗口或者矛盾？)'''
+        self.plotter = Plotter(self.root)
+
+        # 在窗口工具栏处创建暂停、导出数据按钮
+        self.paused_btn = tk.Button(self.plotter.toolbar, text="暂停/继续", command=self.toggle_pause)
+        self.paused_btn.pack(side=tk.LEFT, padx=4, pady=2)
+        self.export_btn = tk.Button(self.plotter.toolbar, text="数据导出", command=self.export_data)
+        self.export_btn.pack(side=tk.LEFT, padx=4, pady=2)
+
+        # 循环采集、信号处理、显示
+        self._capture_loop()
+
+    def bg_measurement(self):
+        self.bg_spec = self.spec.bg_capture()
+        self.wavelengths = self.spec.load_wavelengths()
+
+        self.message_label.config(text="采集完成，是否开始测量？", font=("SimSun", 18))  # .config()更新文字提示
+        self.yes_btn1.config(command=self.start_measurement)  # 更换按钮指令
+        self.no_btn1.config(command=self.quit_program)
+
+    def quit_program(self):
+        self.root.quit()
+        self.lib.seabreeze_close_all_spectrometers(error_code)  # 关闭所有光谱仪
+
+    def _capture_loop(self):
+        if not self.is_measuring or self.is_paused:
+            return
+
+        '''初始化信号处理类'''
+        self.original_spec = self.spec.capture_spectrum()
+        self.current_net_spec = self.original_spec - self.bg_spec  # 净光谱传输
+        self.signal_process = SignalProcessor(self.spec, self.current_net_spec, self.original_spec)
+
+        temp_centroid_x, temp_centroid_y = self.signal_process.calculate_centroid()
+        self.centroid_x.append(temp_centroid_x)
+        self.centroid_y.append(temp_centroid_y)
+
+        min_idx = np.argmin(self.signal_process.apply_fft_filter(0.0211, 0.0279))
+        min_wavelength = self.wavelengths[min_idx]
+        self.min_ifft.append(min_wavelength)
+        if len(self.min_ifft) > 1:
+            self.delta_fft.append(self.min_ifft[-1]-self.min_ifft[0])
+
+        max_intensity = self.signal_process.track_reflection_intensity(500, 700)    # 波段
+        self.delta_intensity.append(max_intensity)
+
+        intensity_gauss_filtered = self.signal_process.gaussian_smoothing(22)      # 调节sigma参数
+        # 显示
+        self.plotter.plotting(self.wavelengths,
+                              intensity_gauss_filtered,
+                              temp_centroid_x,
+                              temp_centroid_y,
+                              min_wavelength,
+                              max_intensity)
+        self.root.after(300, self._capture_loop)
+
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused     # 继续就是多按一下
+
+        if not self.is_paused:
+            self._capture_loop()
+
+    def export_data(self):
+        if self.current_net_spec is None:
+            print(f"NO DATA!")
+            return
+
+        # 统一取最短的长度，避免索引越界
+        min_len = min(len(self.centroid_x), len(self.centroid_y), len(self.delta_fft))
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        )
+        if filepath:
+            with open(filepath, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["质心X坐标", "质心Y坐标", "delta_fft"])
+                for i in range(min_len):
+                    writer.writerow([self.centroid_x[i], self.centroid_y[i], self.delta_fft[i]])
+            print("成功导出数据！")
+
+    def run(self):
+        self.root.mainloop()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    app.run()
+
+
+

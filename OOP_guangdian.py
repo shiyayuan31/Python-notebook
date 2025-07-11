@@ -1,8 +1,10 @@
 # 光电赛的程序文件
+import time
 import numpy as np
+import pandas as pd
 from ctypes import *  # import all
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import csv
@@ -12,7 +14,8 @@ from scipy.ndimage import gaussian_filter1d
 mpl.rcParams['axes.unicode_minus'] = False  # 显示负号
 mpl.rcParams['font.sans-serif'] = ['SimHei']  # 显示中文
 
-'''把显示时间从300改到了100：_capture_loop、_for_cal_average这两处要改'''
+'''采集/刷新时间修改：2000ms：_capture_loop、_for_cal_average这两处要改'''
+'''在_capture_loop里调用capture函数采集光谱，调配调用_capture_loop时间，即可调配采集数据时间！'''
 
 class Spectrometer:
     def __init__(self, lib, index=0):
@@ -89,42 +92,88 @@ class SignalProcessor:
 
 class Plotter:
     def __init__(self, root):
+
         self.root = root
-        self.fig = Figure(figsize=(10, 6))  # 创建逻辑画布
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_title('光谱图', fontsize=18)
-        self.ax.set_xlim(380, 1100)
-        self.ax.set_ylim(-100, 70000)
-        self.ax.set_xlabel('波长(nm)', fontsize=15)
-        self.ax.set_ylabel('光强（.a.u）', fontsize=15)  # 设置画布画什么
 
-        self.line_1, = self.ax.plot([], [], lw=2, color='#54E78C')
-        self.line_2, = self.ax.plot([], [], lw=2, color='#FD0404')
+        # 创建一个Style对象----------------创标签页！
+        self.style = ttk.Style()
+        # 设置样式
+        self.style.configure('TNotebook.Tab', font=('Times New Roman', 18))  # 调整字体和大小
+        # 正确地创建带样式的Notebook（就是集合两个标签页的本子）
+        self.notebook = ttk.Notebook(self.root, style='TNotebook')
+        self.notebook.pack(pady=10, expand=True)
+        # 创建标签页
+        self.tab1 = ttk.Frame(self.notebook)
+        self.tab2 = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab1, text='光谱图')
+        self.notebook.add(self.tab2, text='时序图')
 
-        self.text_centroid = self.ax.text(0.8, 0.95, '',
-                                          transform=self.ax.transAxes,
-                                          fontsize=12, ha='center')
+        # ============图1
+        self.fig1 = Figure(figsize=(10, 6))  # 创建逻辑画布
+        self.ax1 = self.fig1.add_subplot(111)
+        self.ax1.set_title('光谱图', fontsize=18)
+        self.ax1.set_xlim(380, 1100)
+        self.ax1.set_ylim(-100, 70000)
+        self.ax1.set_xlabel('波长(nm)', fontsize=15)
+        self.ax1.set_ylabel('光强（.a.u）', fontsize=15)  # 设置画布画什么
 
-        self.text_cal_result = self.ax.text(0.8, 0.90, '',
-                                            transform=self.ax.transAxes,
-                                            fontsize=12, ha='center')
+        self.ax1.tick_params(axis='both', labelsize=14)  # 同时设置 x 和 y 轴数字刻度字体大小为12
+
+        self.line_1, = self.ax1.plot([], [], lw=2, color='#FD0404')
+        self.line_2, = self.ax1.plot([], [], lw=2, color='#54E78C')
+
+        self.text_centroid = self.ax1.text(0.8, 0.95, '',
+                                          transform=self.ax1.transAxes,
+                                          fontsize=14, ha='center')
+
+        self.text_cal_result = self.ax1.text(0.8, 0.90, '',
+                                            transform=self.ax1.transAxes,
+                                            fontsize=14, ha='center')
+
+        # ============图2
+        self.fig2 = Figure(figsize=(10, 6))  # 创建逻辑画布
+        self.ax2 = self.fig2.add_subplot(111)
+        self.ax2.set_title('时序图', fontsize=18)
+        self.ax2.set_xlim(0, 180)
+        self.ax2.set_ylim(710, 730)
+        self.ax2.set_xlabel('时间', fontsize=15)
+        self.ax2.set_ylabel('波长(nm)', fontsize=15)  # 设置画布画什么
+
+        self.ax2.tick_params(axis='both', labelsize=14)  # 同时设置 x 和 y 轴数字刻度字体大小为12
+
+        self.line_3 = self.ax2.scatter([], [], s=22, color='r', label='')
 
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)   # 创建物理画布（画在哪，与tk窗口绑定）
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)    # 将canvas的tk组件（布局）放到窗口
-
+        # =====画布1=====
+        self.canvas1 = FigureCanvasTkAgg(self.fig1, master=self.tab1)   # 创建物理画布（画在哪，与tk窗口绑定）
+        self.canvas1.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)    # 将canvas的tk组件（布局）放到窗口
         # 创建工具栏并放入窗口(工具栏、按钮这些不是画布！不受canvas.get_tk_widget()影响)
-        self.toolbar = NavigationToolbar2Tk(self.canvas, self.root)
-        self.toolbar.update()
-        self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)    # 导航工具栏放置（满x轴）
+        self.toolbar1 = NavigationToolbar2Tk(self.canvas1, self.tab1)
+        self.toolbar1.update()
+        self.toolbar1.pack(side=tk.BOTTOM, fill=tk.X)    # 导航工具栏放置（满x轴）
+
+        # =====画布2=====
+        self.canvas2 = FigureCanvasTkAgg(self.fig2, master=self.tab2)  # 创建物理画布（画在哪，与tk窗口绑定）
+        self.canvas2.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)  # 将canvas的tk组件（布局）放到窗口
+        # 创建工具栏并放入窗口(工具栏、按钮这些不是画布！不受canvas.get_tk_widget()影响)
+        self.toolbar2 = NavigationToolbar2Tk(self.canvas2, self.tab2)
+        self.toolbar2.update()
+        self.toolbar2.pack(side=tk.BOTTOM, fill=tk.X)  # 导航工具栏放置（满x轴）
+
+        # 放笔记本
+        self.notebook.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
 
 
-    def plotting(self, x, y1, text1, text2, y2):
+    def plotting(self, x, y1, text1, text2, y2, times, x_list):
         self.line_1.set_data(x, y1)
         self.line_2.set_data(x, y2)
         self.text_centroid.set_text(f"质心：({text1:.2f}，{text2:.2f})")
+        # 散点图要用这个设置数据，而非set_data!set_data是线图(对于scatter不能每次只添加一个点，要整个list进行替换)
+        # 最简单兼容的方法就是传递两个list（在list里逐渐append数据）
+        self.line_3.set_offsets(np.column_stack((times, x_list)))
 
-        self.canvas.draw()
+        self.canvas1.draw()
+        self.canvas2.draw()
 
     def cal_result_plot(self, result):
         if result == "待测":
@@ -133,7 +182,7 @@ class Plotter:
         else:
             self.text_cal_result.set_text(f"计算结果:{result:.4f}")
 
-        self.canvas.draw()
+        self.canvas1.draw()
 
 
 class App:
@@ -147,6 +196,9 @@ class App:
         self.centroid_x = []
         self.centroid_y = []
         self.calculate = []
+        self.times = []
+        self.start_time = None
+        self.first = True
 
 
         # == 设置窗口 ==
@@ -201,16 +253,17 @@ class App:
         '''初始化plotter类==(在init内初始化可能会弹出两个窗口或者矛盾？)'''
         self.plotter = Plotter(self.root)
 
+
         # 在窗口工具栏处创建暂停、导出数据按钮
-        self.paused_btn = tk.Button(self.plotter.toolbar, text="暂停/继续", command=self.toggle_pause)
+        self.paused_btn = tk.Button(self.plotter.toolbar1, text="暂停/继续", command=self.toggle_pause)
         self.paused_btn.pack(side=tk.LEFT, padx=4, pady=2)
-        self.export_btn = tk.Button(self.plotter.toolbar, text="数据导出", command=self.export_data)
+        self.export_btn = tk.Button(self.plotter.toolbar1, text="数据导出", command=self.export_data)
         self.export_btn.pack(side=tk.LEFT, padx=4, pady=2)
-        self.catch_btn = tk.Button(self.plotter.toolbar, text="采集", command=self.catch_data)
+        self.catch_btn = tk.Button(self.plotter.toolbar1, text="采集", command=self.catch_data)
         self.catch_btn.pack(side=tk.LEFT, padx=4, pady=2)
-        self.calculate_btn = tk.Button(self.plotter.toolbar, text="计算", command=self.cal_average)
+        self.calculate_btn = tk.Button(self.plotter.toolbar1, text="计算", command=self.cal_average)
         self.calculate_btn.pack(side=tk.LEFT, padx=4, pady=2)
-        self.clear_btn = tk.Button(self.plotter.toolbar, text="清除", command=self.clear)
+        self.clear_btn = tk.Button(self.plotter.toolbar1, text="清除", command=self.clear)
         self.clear_btn.pack(side=tk.LEFT, padx=4, pady=2)
 
 
@@ -245,17 +298,27 @@ class App:
         intensity_gauss_filtered1 = self.signal_process.net_gaussian_smoothing(22)      # 调节sigma参数
         intensity_gauss_filtered2 = self.signal_process.origin_gaussian_smoothing(22)
 
+        # 只执行一次操作（记录初始时间，后面的时间作差）
+        if self.first:
+            self.start_time = time.time()
+            self.first = False
+
+        current_time = time.time()-self.start_time
+        self.times.append(current_time)
+
         # 显示
         self.plotter.plotting(self.wavelengths,
                               intensity_gauss_filtered1,
                               temp_centroid_x,
                               temp_centroid_y,
-                              intensity_gauss_filtered2)
+                              intensity_gauss_filtered2,
+                              self.times,
+                              self.centroid_x)
 
         if not self.is_calculating:
             self.plotter.cal_result_plot(self.result)
 
-        self.root.after(100, self._capture_loop)
+        self.root.after(2000, self._capture_loop)    # 每隔100ms调用一次_capture_loop
 
     def _for_catch_btn(self):
         if not self.is_catching:
@@ -283,7 +346,7 @@ class App:
             self.plotter.cal_result_plot(self.result)
 
             self.is_calculating = not self.is_calculating
-            self.root.after(100, self._for_cal_average)
+            self.root.after(2000, self._for_cal_average)
 
     def _for_clear_data(self):
         if not self.is_clearing:
@@ -304,25 +367,49 @@ class App:
         if not self.is_paused:
             self._capture_loop()
 
+    # def export_data(self):
+    #     if self.current_net_spec is None:
+    #         print(f"NO DATA!")
+    #         return
+    #
+    #     # 统一取最短的长度，避免索引越界
+    #     min_len = min(len(self.centroid_x), len(self.centroid_y))
+    #
+    #     filepath = filedialog.asksaveasfilename(
+    #         defaultextension=".csv",
+    #         filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+    #     )
+    #     if filepath:
+    #         with open(filepath, 'w', newline='') as f:
+    #             writer = csv.writer(f)
+    #             writer.writerow(["质心X坐标", "质心Y坐标"])
+    #             for i in range(min_len):
+    #                 writer.writerow([self.centroid_x[i], self.centroid_y[i]])
+    #         print("成功导出数据！")
+
     def export_data(self):
         if self.current_net_spec is None:
-            print(f"NO DATA!")
+            print("NO DATA!")
             return
 
-        # 统一取最短的长度，避免索引越界
         min_len = min(len(self.centroid_x), len(self.centroid_y))
 
+        # 构建 DataFrame
+        df = pd.DataFrame({
+            "质心X坐标": self.centroid_x[:min_len],
+            "质心Y坐标": self.centroid_y[:min_len]
+        })
+
         filepath = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV文件", "*.csv"), ("所有文件", "*.*")]
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx"), ("所有文件", "*.*")]
         )
         if filepath:
-            with open(filepath, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["质心X坐标", "质心Y坐标"])
-                for i in range(min_len):
-                    writer.writerow([self.centroid_x[i], self.centroid_y[i]])
-            print("成功导出数据！")
+            try:
+                df.to_excel(filepath, index=False)
+                print("成功导出数据为 Excel 文件！")
+            except Exception as e:
+                print("导出失败:", e)
 
     def catch_data(self):
         self.is_catching = not self.is_catching

@@ -12,6 +12,7 @@ from scipy.ndimage import gaussian_filter1d
 mpl.rcParams['axes.unicode_minus'] = False  # 显示负号
 mpl.rcParams['font.sans-serif'] = ['SimHei']  # 显示中文
 
+'''把显示时间从300改到了100：_capture_loop、_for_cal_average这两处要改'''
 
 class Spectrometer:
     def __init__(self, lib, index=0):
@@ -77,9 +78,12 @@ class SignalProcessor:
 
         return wavelengths_centroid, intensity_centroid
 
-    # 平滑函数(未使用self参数的时候会在函数名出现波浪线)
-    def gaussian_smoothing(self, sigma):
-        return gaussian_filter1d(self.intensity_net, sigma)
+    # 平滑函数：未使用self参数的时候会在函数名出现波浪线
+    def net_gaussian_smoothing(self, sigma):
+        return gaussian_filter1d(self.intensity_net, sigma)    # 只需要对净光谱进行高斯滤波就行，不用原始和空气分别平滑！
+
+    def origin_gaussian_smoothing(self, sigma):
+        return gaussian_filter1d(self.intensity_origin, sigma)    # 只需要对净光谱进行高斯滤波就行，不用原始和空气分别平滑！
 
 
 
@@ -88,13 +92,15 @@ class Plotter:
         self.root = root
         self.fig = Figure(figsize=(10, 6))  # 创建逻辑画布
         self.ax = self.fig.add_subplot(111)
-        self.ax.set_title('净光谱图', fontsize=18)
+        self.ax.set_title('光谱图', fontsize=18)
         self.ax.set_xlim(380, 1100)
-        self.ax.set_ylim(-5000, 5000)
+        self.ax.set_ylim(-100, 70000)
         self.ax.set_xlabel('波长(nm)', fontsize=15)
         self.ax.set_ylabel('光强（.a.u）', fontsize=15)  # 设置画布画什么
 
-        self.line, = self.ax.plot([], [], lw=2, color='#54E78C')
+        self.line_1, = self.ax.plot([], [], lw=2, color='#54E78C')
+        self.line_2, = self.ax.plot([], [], lw=2, color='#FD0404')
+
         self.text_centroid = self.ax.text(0.8, 0.95, '',
                                           transform=self.ax.transAxes,
                                           fontsize=12, ha='center')
@@ -113,8 +119,9 @@ class Plotter:
         self.toolbar.pack(side=tk.BOTTOM, fill=tk.X)    # 导航工具栏放置（满x轴）
 
 
-    def plotting(self, x, y, text1, text2):
-        self.line.set_data(x, y)
+    def plotting(self, x, y1, text1, text2, y2):
+        self.line_1.set_data(x, y1)
+        self.line_2.set_data(x, y2)
         self.text_centroid.set_text(f"质心：({text1:.2f}，{text2:.2f})")
 
         self.canvas.draw()
@@ -235,17 +242,20 @@ class App:
         self.centroid_x.append(temp_centroid_x)
         self.centroid_y.append(temp_centroid_y)
 
-        intensity_gauss_filtered = self.signal_process.gaussian_smoothing(22)      # 调节sigma参数
+        intensity_gauss_filtered1 = self.signal_process.net_gaussian_smoothing(22)      # 调节sigma参数
+        intensity_gauss_filtered2 = self.signal_process.origin_gaussian_smoothing(22)
+
         # 显示
         self.plotter.plotting(self.wavelengths,
-                              intensity_gauss_filtered,
+                              intensity_gauss_filtered1,
                               temp_centroid_x,
-                              temp_centroid_y,)
+                              temp_centroid_y,
+                              intensity_gauss_filtered2)
 
         if not self.is_calculating:
             self.plotter.cal_result_plot(self.result)
 
-        self.root.after(300, self._capture_loop)
+        self.root.after(100, self._capture_loop)
 
     def _for_catch_btn(self):
         if not self.is_catching:
@@ -273,7 +283,7 @@ class App:
             self.plotter.cal_result_plot(self.result)
 
             self.is_calculating = not self.is_calculating
-            self.root.after(300, self._for_cal_average)
+            self.root.after(100, self._for_cal_average)
 
     def _for_clear_data(self):
         if not self.is_clearing:
